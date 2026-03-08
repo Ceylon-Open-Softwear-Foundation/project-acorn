@@ -1,7 +1,24 @@
-# Tauri + React
+# 🌰 Project Acorn
 
-This template should help get you started developing with Tauri and React in Vite.
+> **Production Started!** 🚀
 
-## Recommended IDE Setup
+## 🛠️ Tech Stack
 
-- [VS Code](https://code.visualstudio.com/) + [Tauri](https://marketplace.visualstudio.com/items?itemName=tauri-apps.tauri-vscode) + [rust-analyzer](https://marketplace.visualstudio.com/items?itemName=rust-lang.rust-analyzer)
+- **Frontend:** React + Vite
+- **Desktop Framework:** Tauri
+- **Package Manager:** Bun
+
+## 🚀 Quick Start
+
+```bash
+# Install dependencies
+bun install
+
+# Start development server
+bun run dev
+
+# Build for production
+bun run build
+```
+
+*Built with ❤️ from [Oshen Vithanage](https://github.com/OGVithanage) and [Ceylon Open Softwear Foundation](https://github.com/Ceylon-Open-Softwear-Foundation)*
