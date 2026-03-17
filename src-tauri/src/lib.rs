@@ -1,28 +1,33 @@
 use serde::Serialize;
 use std::sync::Mutex;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use sysinfo::System;
+use tauri::Manager;
+
+mod db;
+
+const FLUSH_INTERVAL: Duration = Duration::from_secs(300); // 5 minutes
+const PRUNE_AGE_SECS: i64 = 90 * 86400; // 90 days
 
 // --- State ---
+
+struct Sample {
+    cpu: f32,
+    ram: f32,
+    score: f32,
+}
 
 pub struct AppState {
     system: System,
     cpu_peak: f32,
     ram_peak: f32,
+    // Long-term tracking
+    buffer: Vec<Sample>,
+    last_flush: Instant,
+    db: rusqlite::Connection,
 }
 
-impl AppState {
-    fn new() -> Self {
-        let mut system = System::new_all();
-        system.refresh_all();
-        Self {
-            system,
-            cpu_peak: 0.0,
-            ram_peak: 0.0,
-        }
-    }
-}
-
-// --- Response type ---
+// --- Response types ---
 
 #[derive(Serialize)]
 pub struct HardwareStats {
@@ -30,11 +35,10 @@ pub struct HardwareStats {
     cpu_peak: f32,
     ram_current: f32,
     ram_peak: f32,
-    /// Suitability Score (0–100): cpu_peak * 0.7 + ram_current * 0.3
     score: f32,
 }
 
-// --- Tauri command ---
+// --- Commands ---
 
 #[tauri::command]
 fn get_hardware_stats(state: tauri::State<Mutex<AppState>>) -> HardwareStats {
@@ -64,8 +68,20 @@ fn get_hardware_stats(state: tauri::State<Mutex<AppState>>) -> HardwareStats {
     let cpu_peak = s.cpu_peak;
     let ram_peak = s.ram_peak;
 
-    // Weighted suitability score (FR-5): higher utilisation = better match
+    // Weighted suitability score (FR-5)
     let score = (cpu_peak * 0.7 + ram_current * 0.3).round();
+
+    // Accumulate sample for long-term tracking
+    s.buffer.push(Sample {
+        cpu: cpu_current,
+        ram: ram_current,
+        score,
+    });
+
+    // Flush to DB every FLUSH_INTERVAL
+    if s.last_flush.elapsed() >= FLUSH_INTERVAL && !s.buffer.is_empty() {
+        flush_buffer(&mut s);
+    }
 
     HardwareStats {
         cpu_current: round1(cpu_current),
@@ -74,6 +90,48 @@ fn get_hardware_stats(state: tauri::State<Mutex<AppState>>) -> HardwareStats {
         ram_peak: round1(ram_peak),
         score,
     }
+}
+
+#[tauri::command]
+fn get_usage_history(
+    state: tauri::State<Mutex<AppState>>,
+    days: Option<u32>,
+) -> Vec<db::DailySummary> {
+    let mut s = state.lock().unwrap();
+    // Flush pending samples so history is up-to-date
+    flush_buffer(&mut s);
+    db::get_daily_summaries(&s.db, days.unwrap_or(30)).unwrap_or_default()
+}
+
+// --- Helpers ---
+
+fn flush_buffer(s: &mut AppState) {
+    if s.buffer.is_empty() {
+        return;
+    }
+
+    let len = s.buffer.len() as f32;
+    let avg_cpu = s.buffer.iter().map(|sm| sm.cpu).sum::<f32>() / len;
+    let peak_cpu = s.buffer.iter().map(|sm| sm.cpu).fold(0.0_f32, f32::max);
+    let avg_ram = s.buffer.iter().map(|sm| sm.ram).sum::<f32>() / len;
+    let peak_ram = s.buffer.iter().map(|sm| sm.ram).fold(0.0_f32, f32::max);
+    let avg_score = s.buffer.iter().map(|sm| sm.score).sum::<f32>() / len;
+
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+
+    if let Err(e) = db::insert_snapshot(&s.db, ts, avg_cpu, peak_cpu, avg_ram, peak_ram, avg_score)
+    {
+        eprintln!("Failed to write snapshot: {e}");
+    }
+
+    // Prune data older than 90 days
+    let _ = db::prune_old(&s.db, ts - PRUNE_AGE_SECS);
+
+    s.buffer.clear();
+    s.last_flush = Instant::now();
 }
 
 fn round1(v: f32) -> f32 {
@@ -85,9 +143,29 @@ fn round1(v: f32) -> f32 {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .manage(Mutex::new(AppState::new()))
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![get_hardware_stats])
+        .setup(|app| {
+            let data_dir = app.path().app_data_dir()?;
+            std::fs::create_dir_all(&data_dir)?;
+
+            let db_conn =
+                db::open(&data_dir.join("usage.db")).expect("Failed to open usage database");
+
+            let mut system = System::new_all();
+            system.refresh_all();
+
+            app.manage(Mutex::new(AppState {
+                system,
+                cpu_peak: 0.0,
+                ram_peak: 0.0,
+                buffer: Vec::with_capacity(128),
+                last_flush: Instant::now(),
+                db: db_conn,
+            }));
+
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![get_hardware_stats, get_usage_history])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

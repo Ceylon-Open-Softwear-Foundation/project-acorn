@@ -35,6 +35,25 @@ function getScoreState(score) {
   };
 }
 
+function formatDate(dateStr) {
+  const [year, month, day] = dateStr.split("-").map(Number);
+  const date = new Date(year, month - 1, day);
+  const today = new Date();
+  const yesterday = new Date(today);
+  yesterday.setDate(yesterday.getDate() - 1);
+
+  if (date.toDateString() === today.toDateString()) return "Today";
+  if (date.toDateString() === yesterday.toDateString()) return "Yesterday";
+  return date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
+function formatDuration(minutes) {
+  if (minutes < 60) return `${minutes}m`;
+  const h = Math.floor(minutes / 60);
+  const m = minutes % 60;
+  return m > 0 ? `${h}h ${m}m` : `${h}h`;
+}
+
 // --- Semicircular Gauge (270-degree arc) ---
 
 function SuitabilityGauge({ score, state }) {
@@ -146,10 +165,48 @@ function StatCard({ label, current, peak, barColor }) {
   );
 }
 
+// --- History Row ---
+
+function HistoryRow({ summary }) {
+  const scoreState = getScoreState(summary.avg_score);
+
+  return (
+    <div className="flex items-center justify-between py-2.5">
+      <div className="flex items-center gap-2.5">
+        <div
+          className="w-2 h-2 rounded-full shrink-0"
+          style={{ backgroundColor: scoreState.strokeColor }}
+        />
+        <div className="flex items-baseline gap-2">
+          <span className="text-xs font-medium text-foreground">
+            {formatDate(summary.date)}
+          </span>
+          <span className="text-[10px] text-muted-foreground">{scoreState.label}</span>
+        </div>
+      </div>
+      <div className="flex items-center gap-4 text-[11px] tabular-nums">
+        <span className="text-muted-foreground">
+          CPU {Math.round(summary.avg_cpu)}%
+        </span>
+        <span className="text-muted-foreground">
+          RAM {Math.round(summary.avg_ram)}%
+        </span>
+        <span className={`font-semibold ${scoreState.textColor}`}>
+          {Math.round(summary.avg_score)}%
+        </span>
+        <span className="text-muted-foreground w-12 text-right">
+          {formatDuration(summary.active_minutes)}
+        </span>
+      </div>
+    </div>
+  );
+}
+
 // --- App ---
 
 export default function App() {
   const [stats, setStats] = useState(DEFAULT_STATS);
+  const [history, setHistory] = useState(null);
 
   useEffect(() => {
     const fetchStats = async () => {
@@ -163,6 +220,22 @@ export default function App() {
 
     fetchStats();
     const interval = setInterval(fetchStats, 3000);
+    return () => clearInterval(interval);
+  }, []);
+
+  useEffect(() => {
+    const fetchHistory = async () => {
+      try {
+        const data = await invoke("get_usage_history", { days: 30 });
+        setHistory(data);
+      } catch (err) {
+        console.error("Failed to fetch usage history:", err);
+        setHistory([]);
+      }
+    };
+
+    fetchHistory();
+    const interval = setInterval(fetchHistory, 300000); // refresh every 5 min
     return () => clearInterval(interval);
   }, []);
 
@@ -181,7 +254,7 @@ export default function App() {
       />
 
       <div className="relative flex-1 flex flex-col gap-3 p-4 overflow-hidden">
-        {/* Top card — Statistics */}
+        {/* Top card — Live Statistics */}
         <div className="rounded-2xl bg-card/60 backdrop-blur-sm border border-border p-4 flex flex-col items-center gap-3 shrink-0 animate-fade-in-up">
           <SuitabilityGauge score={stats.score} state={state} />
 
@@ -201,28 +274,46 @@ export default function App() {
           </div>
         </div>
 
-        {/* Bottom card — Recommendations (placeholder) */}
+        {/* Bottom card — Usage History */}
         <div className="flex-1 rounded-2xl bg-card/60 backdrop-blur-sm border border-border flex flex-col overflow-hidden min-h-0 animate-fade-in-up-delay">
-          <div className="flex items-center justify-between px-4 py-3 border-b border-border shrink-0">
-            <h2 className="text-sm font-semibold text-foreground">Recommended Machines</h2>
-            <span className="text-[11px] text-muted-foreground">{state.label}</span>
+          <div className="flex items-center justify-between px-4 py-2.5 border-b border-border shrink-0">
+            <h2 className="text-xs font-semibold text-foreground">Usage History</h2>
+            <span className="text-[10px] text-muted-foreground">Last 30 days</span>
           </div>
 
-          <div className="flex-1 overflow-y-auto p-4">
-            <div className="flex flex-col items-center justify-center h-full text-center gap-2">
-              <div className="w-10 h-10 rounded-full bg-muted/60 flex items-center justify-center">
-                <svg className="w-5 h-5 text-muted-foreground" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-                  <rect x="2" y="3" width="20" height="14" rx="2" />
-                  <path d="M8 21h8M12 17v4" />
-                </svg>
+          <div className="flex-1 overflow-y-auto">
+            {history === null ? (
+              <div className="flex items-center justify-center h-full">
+                <span className="text-xs text-muted-foreground">Loading...</span>
               </div>
-              <p className="text-sm text-muted-foreground">
-                Machine recommendations will appear here
-              </p>
-              <p className="text-[11px] text-muted-foreground/60">
-                Based on your usage patterns
-              </p>
-            </div>
+            ) : history.length === 0 ? (
+              <div className="flex flex-col items-center justify-center h-full text-center gap-2 px-4">
+                <div className="w-9 h-9 rounded-full bg-muted/60 flex items-center justify-center">
+                  <svg
+                    className="w-4 h-4 text-muted-foreground"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.5"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  >
+                    <circle cx="12" cy="12" r="10" />
+                    <polyline points="12 6 12 12 16 14" />
+                  </svg>
+                </div>
+                <p className="text-xs text-muted-foreground">No usage data yet</p>
+                <p className="text-[10px] text-muted-foreground/60 max-w-48">
+                  Keep the app running — daily summaries will appear here after a few minutes
+                </p>
+              </div>
+            ) : (
+              <div className="divide-y divide-border/50 px-4">
+                {history.map((day) => (
+                  <HistoryRow key={day.date} summary={day} />
+                ))}
+              </div>
+            )}
           </div>
         </div>
       </div>
