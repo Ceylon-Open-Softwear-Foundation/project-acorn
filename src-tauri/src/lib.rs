@@ -1,5 +1,5 @@
 use serde::Serialize;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use sysinfo::System;
 use tauri::Manager;
@@ -29,6 +29,14 @@ pub struct AppState {
 
 // --- Response types ---
 
+#[derive(Serialize, Clone)]
+pub struct GpuStats {
+    name: String,
+    usage_percent: Option<f32>,
+    vram_used_mb: Option<u32>,
+    vram_total_mb: Option<u32>,
+}
+
 #[derive(Serialize)]
 pub struct HardwareStats {
     cpu_current: f32,
@@ -36,6 +44,94 @@ pub struct HardwareStats {
     ram_current: f32,
     ram_peak: f32,
     score: f32,
+    gpu: Option<GpuStats>,
+}
+
+// --- GPU monitoring ---
+
+struct GpuInitInfo {
+    name: String,
+    vram_total_mb: Option<u32>,
+}
+
+static GPU_INIT: OnceLock<GpuInitInfo> = OnceLock::new();
+
+#[cfg(target_os = "macos")]
+fn gpu_init_info() -> &'static GpuInitInfo {
+    GPU_INIT.get_or_init(|| {
+        let (name, vram_total_mb) = std::process::Command::new("system_profiler")
+            .args(["SPDisplaysDataType", "-json"])
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+            .and_then(|json| {
+                let first = json["SPDisplaysDataType"].as_array()?.first()?.clone();
+                let name = first["_name"]
+                    .as_str()
+                    .or_else(|| first["sppci_model"].as_str())
+                    .unwrap_or("Unknown GPU")
+                    .to_string();
+                let vram = first["_spdisplays_vram"].as_str().and_then(parse_vram_str);
+                Some((name, vram))
+            })
+            .unwrap_or_else(|| ("Unknown GPU".to_string(), None));
+        GpuInitInfo { name, vram_total_mb }
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn parse_vram_str(s: &str) -> Option<u32> {
+    let s = s.trim();
+    if let Some(mb) = s.strip_suffix(" MB") {
+        return mb.trim().parse().ok();
+    }
+    if let Some(gb) = s.strip_suffix(" GB") {
+        let g: f32 = gb.trim().parse().ok()?;
+        return Some((g * 1024.0) as u32);
+    }
+    None
+}
+
+fn find_u64_after(text: &str, marker: &str) -> Option<u64> {
+    let pos = text.find(marker)?;
+    let rest = &text[pos + marker.len()..];
+    let end = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
+    if end == 0 { return None; }
+    rest[..end].parse().ok()
+}
+
+#[cfg(target_os = "macos")]
+fn get_gpu_stats() -> Option<GpuStats> {
+    let init = gpu_init_info();
+    let text = std::process::Command::new("ioreg")
+        .args(["-rc", "IOAccelerator"])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())?;
+
+    // Apple Silicon uses "Device Utilization %" in ioreg PerformanceStatistics
+    let usage_percent = find_u64_after(&text, "\"Device Utilization %\"=")
+        .or_else(|| find_u64_after(&text, "\"Device Utilization %\" = "))
+        .or_else(|| find_u64_after(&text, "\"GPU Activity(%)\"="))
+        .or_else(|| find_u64_after(&text, "\"GPU Activity(%)\":"))
+        .map(|v| v as f32);
+    // "In use system memory" is in bytes (unified / VRAM in use)
+    let vram_used_mb = find_u64_after(&text, "\"In use system memory\"=")
+        .or_else(|| find_u64_after(&text, "\"In use system memory\":"))
+        .map(|b| (b / 1_048_576) as u32);
+
+    Some(GpuStats {
+        name: init.name.clone(),
+        usage_percent,
+        vram_used_mb,
+        vram_total_mb: init.vram_total_mb,
+    })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn get_gpu_stats() -> Option<GpuStats> {
+    None
 }
 
 // --- Commands ---
@@ -89,6 +185,7 @@ fn get_hardware_stats(state: tauri::State<Mutex<AppState>>) -> HardwareStats {
         ram_current: round1(ram_current),
         ram_peak: round1(ram_peak),
         score,
+        gpu: get_gpu_stats(),
     }
 }
 

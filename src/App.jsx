@@ -8,6 +8,7 @@ const DEFAULT_STATS = {
   ram_current: 0,
   ram_peak: 0,
   score: 0,
+  gpu: null,
 };
 
 function getScoreState(score) {
@@ -165,6 +166,51 @@ function StatCard({ label, current, peak, barColor }) {
   );
 }
 
+// --- GPU Card ---
+
+function GpuCard({ gpu }) {
+  const usage = gpu?.usage_percent ?? null;
+  const vramUsed = gpu?.vram_used_mb ?? null;
+  const vramTotal = gpu?.vram_total_mb ?? null;
+
+  const fmt = (mb) => (mb >= 1024 ? `${(mb / 1024).toFixed(1)}G` : `${mb}M`);
+  const vramLabel =
+    vramUsed != null
+      ? vramTotal != null
+        ? `${fmt(vramUsed)} / ${fmt(vramTotal)}`
+        : `${fmt(vramUsed)} used`
+      : null;
+
+  return (
+    <div className="flex-1 rounded-lg bg-muted/40 p-3 space-y-2">
+      <div className="flex items-center justify-between">
+        <span className="text-xs font-medium text-foreground">GPU</span>
+        <span className="text-[10px] text-muted-foreground font-medium tabular-nums">
+          {vramLabel ?? "VRAM —"}
+        </span>
+      </div>
+
+      <div className="text-xl font-bold tabular-nums text-foreground">
+        {usage != null ? (
+          <>
+            {usage.toFixed(1)}
+            <span className="text-xs font-medium text-muted-foreground ml-0.5">%</span>
+          </>
+        ) : (
+          <span className="text-base font-medium text-muted-foreground">N/A</span>
+        )}
+      </div>
+
+      <div className="h-1 rounded-full bg-muted overflow-hidden">
+        <div
+          className="h-full rounded-full transition-all duration-500 ease-out bg-emerald-500"
+          style={{ width: usage != null ? `${Math.min(usage, 100)}%` : "0%" }}
+        />
+      </div>
+    </div>
+  );
+}
+
 // --- History Row ---
 
 function HistoryRow({ summary }) {
@@ -258,7 +304,7 @@ export default function App() {
         <div className="rounded-2xl bg-card/60 backdrop-blur-sm border border-border p-4 flex flex-col items-center gap-3 shrink-0 animate-fade-in-up">
           <SuitabilityGauge score={stats.score} state={state} />
 
-          <div className="w-full grid grid-cols-2 gap-2.5">
+          <div className="w-full grid grid-cols-3 gap-2">
             <StatCard
               label="CPU"
               current={stats.cpu_current}
@@ -271,6 +317,7 @@ export default function App() {
               peak={stats.ram_peak}
               barColor="bg-violet-500"
             />
+            <GpuCard gpu={stats.gpu} />
           </div>
         </div>
 
